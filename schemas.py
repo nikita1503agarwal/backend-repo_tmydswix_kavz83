@@ -6,7 +6,7 @@ Collection name is the lowercase class name.
 """
 
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Any
 from datetime import datetime
 
 class Rfp(BaseModel):
@@ -22,7 +22,7 @@ class Rfp(BaseModel):
 
 class Proposal(BaseModel):
     """
-    Proposals generated from RFPs
+    Simple proposal artifact generated immediately after RFP upload
     Collection name: "proposal"
     """
     rfp_id: str = Field(..., description="Reference to the RFP document id")
@@ -34,3 +34,37 @@ class Proposal(BaseModel):
     sections: List[dict] = Field(default_factory=list, description="Structured proposal sections with headings and content")
     status: str = Field("generated", description="Status of the proposal")
     generated_at: Optional[datetime] = Field(default=None, description="Timestamp of generation")
+
+# New collections for full-feature flows
+class TeamMember(BaseModel):
+    """Collection name: teammember"""
+    name: str
+    role: str
+    titleQual: Optional[str] = None
+    blurb: Optional[str] = None
+    bullets: Optional[str] = Field(None, description="Multi-line text, one bullet per line")
+    photo_url: Optional[str] = Field(None, description="URL of uploaded photo")
+
+class ProjectHighlight(BaseModel):
+    """Collection name: projecthighlight"""
+    title: str
+    sector: Optional[str] = None
+    summary: Optional[str] = None
+    bullets: Optional[str] = Field(None, description="Multi-line bullets")
+
+class ProposalDoc(BaseModel):
+    """
+    Rich proposal record matching product spec
+    Collection name: "proposaldoc"
+    """
+    clientName: str
+    projectTitle: str
+    rfpId: Optional[str] = Field(None, description="Reference to uploaded RFP record")
+    rfpFileUrl: Optional[str] = None
+    placeholdersJson: Any
+    docxFileUrl: Optional[str] = None
+    pdfFileUrl: Optional[str] = None
+    status: str = Field("draft", description="draft/sent")
+    version: int = 1
+    teamMemberIds: List[str] = Field(default_factory=list)
+    projectHighlightIds: List[str] = Field(default_factory=list)

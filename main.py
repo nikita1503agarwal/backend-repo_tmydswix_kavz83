@@ -3,11 +3,11 @@ import io
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List, Any, Dict
 from datetime import datetime, timezone
 
 from database import db, create_document, get_documents
-from schemas import Rfp, Proposal
+from schemas import Rfp, Proposal, TeamMember, ProjectHighlight, ProposalDoc
 
 # Optional file parsers
 try:
@@ -34,6 +34,12 @@ app.add_middleware(
 class ProposalResponse(BaseModel):
     proposal_id: str
     rfp_id: str
+
+
+TRANSPARENT_PNG_DATA_URL = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAuMBgThmO8kAAAAASUVORK5CYII="
+)
 
 
 def extract_text_from_file(upload: UploadFile, data: bytes) -> str:
@@ -189,6 +195,9 @@ async def root():
     return {"message": "RFP → Proposal API running"}
 
 
+# -----------------
+# RFP Upload → Basic Proposal (existing flow)
+# -----------------
 @app.post("/api/rfps/upload", response_model=ProposalResponse)
 async def upload_rfp(file: UploadFile = File(...)):
     data = await file.read()
@@ -258,6 +267,166 @@ async def list_rfps(limit: int = 50):
     return out
 
 
+# -----------------
+# Collections: Team Members & Project Highlights
+# -----------------
+class CreateTeamMember(BaseModel):
+    name: str
+    role: str
+    titleQual: Optional[str] = None
+    blurb: Optional[str] = None
+    bullets: Optional[str] = None  # multiline
+    photo_url: Optional[str] = None
+
+
+@app.post("/api/team-members")
+async def create_team_member(payload: CreateTeamMember):
+    tm = TeamMember(**payload.model_dump())
+    _id = create_document("teammember", tm)
+    return {"id": _id}
+
+
+@app.get("/api/team-members")
+async def list_team_members(limit: int = 100):
+    docs = get_documents("teammember", {}, limit)
+    out = []
+    for d in docs:
+        out.append({
+            "id": str(d.get("_id")),
+            "name": d.get("name"),
+            "role": d.get("role"),
+            "titleQual": d.get("titleQual"),
+            "blurb": d.get("blurb"),
+            "bullets": d.get("bullets"),
+            "photo_url": d.get("photo_url") or TRANSPARENT_PNG_DATA_URL,
+        })
+    return out
+
+
+class CreateProjectHighlight(BaseModel):
+    title: str
+    sector: Optional[str] = None
+    summary: Optional[str] = None
+    bullets: Optional[str] = None
+
+
+@app.post("/api/project-highlights")
+async def create_project_highlight(payload: CreateProjectHighlight):
+    ph = ProjectHighlight(**payload.model_dump())
+    _id = create_document("projecthighlight", ph)
+    return {"id": _id}
+
+
+@app.get("/api/project-highlights")
+async def list_project_highlights(limit: int = 100):
+    docs = get_documents("projecthighlight", {}, limit)
+    out = []
+    for d in docs:
+        out.append({
+            "id": str(d.get("_id")),
+            "title": d.get("title"),
+            "sector": d.get("sector"),
+            "summary": d.get("summary"),
+            "bullets": d.get("bullets"),
+        })
+    return out
+
+
+# -----------------
+# Rich ProposalDocs (placeholders, files, versions)
+# -----------------
+class CreateProposalDoc(BaseModel):
+    clientName: str
+    projectTitle: str
+    rfpId: Optional[str] = None
+    placeholdersJson: Any
+    teamMemberIds: List[str] = []
+    projectHighlightIds: List[str] = []
+    status: Optional[str] = "draft"
+
+
+@app.post("/api/proposals-docs")
+async def create_proposal_doc(payload: CreateProposalDoc):
+    doc = ProposalDoc(
+        clientName=payload.clientName or "Client",
+        projectTitle=payload.projectTitle or "Project",
+        rfpId=payload.rfpId,
+        placeholdersJson=payload.placeholdersJson or {},
+        status=payload.status or "draft",
+        version=1,
+        teamMemberIds=payload.teamMemberIds or [],
+        projectHighlightIds=payload.projectHighlightIds or [],
+    )
+    _id = create_document("proposaldoc", doc)
+    return {"id": _id, "version": 1}
+
+
+@app.get("/api/proposals-docs")
+async def list_proposal_docs(limit: int = 100):
+    docs = get_documents("proposaldoc", {}, limit)
+    out = []
+    for d in docs:
+        out.append({
+            "id": str(d.get("_id")),
+            "clientName": d.get("clientName"),
+            "projectTitle": d.get("projectTitle"),
+            "version": d.get("version", 1),
+            "status": d.get("status", "draft"),
+            "created_at": d.get("created_at"),
+        })
+    # Sort by created_at desc if present
+    out.sort(key=lambda x: x.get("created_at") or datetime(1970,1,1,tzinfo=timezone.utc), reverse=True)
+    return out
+
+
+@app.get("/api/proposals-docs/{doc_id}")
+async def get_proposal_doc(doc_id: str):
+    from bson import ObjectId
+    try:
+        obj_id = ObjectId(doc_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid id")
+
+    d = db["proposaldoc"].find_one({"_id": obj_id})
+    if not d:
+        raise HTTPException(status_code=404, detail="Not found")
+    d["id"] = str(d.pop("_id"))
+    return d
+
+
+class RegeneratePayload(BaseModel):
+    placeholdersJson: Any
+    status: Optional[str] = "draft"
+
+
+@app.post("/api/proposals-docs/{doc_id}/regenerate")
+async def regenerate_proposal_doc(doc_id: str, payload: RegeneratePayload):
+    from bson import ObjectId
+    try:
+        obj_id = ObjectId(doc_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid id")
+
+    current = db["proposaldoc"].find_one({"_id": obj_id})
+    if not current:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    # Duplicate with version+1
+    new_doc = current.copy()
+    new_doc.pop("_id", None)
+    new_doc["version"] = int(current.get("version", 1)) + 1
+    new_doc["placeholdersJson"] = payload.placeholdersJson or {}
+    new_doc["status"] = payload.status or "draft"
+    new_doc["created_at"] = datetime.now(timezone.utc)
+    new_doc["updated_at"] = datetime.now(timezone.utc)
+
+    res = db["proposaldoc"].insert_one(new_doc)
+    return {"id": str(res.inserted_id), "version": new_doc["version"]}
+
+
+# -----------------
+# Utility & Health
+# -----------------
 @app.get("/test")
 def test_database():
     response = {
